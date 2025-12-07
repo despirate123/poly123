@@ -72,14 +72,15 @@ class PolymarketClient:
         for item in data if isinstance(data, list) else data.get("markets", []):
             outcomes: List[MarketOutcome] = []
             for outcome in item.get("outcomes", []):
-                order_book = outcome.get("orderBook", {})
+                order_book = outcome.get("orderBook", {}) or {}
+                best_bid, best_ask, best_ask_size = _extract_best_levels(outcome, order_book)
                 outcomes.append(
                     MarketOutcome(
                         id=str(outcome.get("id", outcome.get("tokenId", ""))),
                         name=outcome.get("name", ""),
-                        best_bid=_safe_float(order_book.get("bestBid")),
-                        best_ask=_safe_float(order_book.get("bestAsk")),
-                        best_ask_size=_safe_float(order_book.get("bestAskSize")),
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                        best_ask_size=best_ask_size,
                     )
                 )
 
@@ -87,7 +88,7 @@ class PolymarketClient:
                 Market(
                     id=str(item.get("id")),
                     question=item.get("question", item.get("title", "")),
-                    end_date_iso=item.get("endDate", item.get("resolveDate", "")),
+                    end_date_iso=_pick_end_date(item),
                     outcomes=outcomes,
                 )
             )
@@ -131,3 +132,39 @@ def _safe_float(value: Optional[float]) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extract_best_levels(outcome: Dict, order_book: Dict) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Derive best bid/ask and size from various order book shapes."""
+
+    best_bid = _safe_float(order_book.get("bestBid") or outcome.get("bestBid"))
+    best_ask = _safe_float(order_book.get("bestAsk") or outcome.get("bestAsk"))
+    best_ask_size = _safe_float(order_book.get("bestAskSize") or outcome.get("bestAskSize"))
+
+    asks = order_book.get("asks") or outcome.get("asks")
+    if (best_ask is None or best_ask_size is None) and isinstance(asks, list) and asks:
+        # Some responses only include raw ask levels; take the best one.
+        top_ask = min(asks, key=lambda level: float(level.get("price", float("inf"))))
+        best_ask = _safe_float(best_ask or top_ask.get("price"))
+        best_ask_size = _safe_float(best_ask_size or top_ask.get("size") or top_ask.get("amount"))
+
+    return best_bid, best_ask, best_ask_size
+
+
+def _pick_end_date(item: Dict) -> str:
+    """Choose the most likely end/resolve date field from a market payload."""
+
+    for key in [
+        "endDate",
+        "resolveDate",
+        "end_date",
+        "resolve_time",
+        "resolveTime",
+        "closeDate",
+        "expiry",
+        "endTime",
+        "resolutionTime",
+    ]:
+        if key in item and item[key]:
+            return item[key]
+    return ""
